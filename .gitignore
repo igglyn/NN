@@ -1,9 +1,9 @@
 # Devenv
-.devenv*
-devenv.local.nix
+env/.devenv*
+env/devenv.local.nix
 
 # direnv
-.direnv
+env/.direnv
 
 # pre-commit
 .pre-commit-config.yaml
