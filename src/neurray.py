@@ -39,7 +39,7 @@ class Neurray:
 
     def forward(self, lop:np.ndarray) -> np.ndarray:
         # handle each of the 4 opts
-        ## NOTE decide on what ops to use here I'm glueless
+        ## NOTE only using OR and AND, the max states is equal to 2^numAND, (1,2,4,8,16)
         self.hidden[0] = np.where(np.bitwise_and(lop, self.match[0]) == 0, self.emit[0], ~self.emit[0])
         self.hidden[1] = np.where(np.bitwise_and(lop, self.match[1]) == 0, self.emit[1], ~self.emit[1])
         self.hidden[2] = np.where(np.bitwise_and(lop, self.match[2]) == 0, self.emit[2], ~self.emit[2])
@@ -63,35 +63,38 @@ class Neurray:
         # it is not being done here to remain flexable
         return mask
 
+    def effect(self): pass
 
-    def backward(self) -> None:
-        ## This is seperate from effect to allow the skipping of calling unwanted backward passes
-        # calculate via stimulation which should be edited
-        # NOTE `- 1` is used because it can get stuck
+
+
+    def backward(self, lop:np.ndarray, result:np.ndarray, target:np.ndarray) -> None:
+        self._effects = np.sum(unpackbits(np.bitwise_xor(self.hidden, np.reshape(self.hidden, (1,4,self.width)))), (1,3)) // 3
+        # Above is considered the effects within the array, below is the effects of the array
+        self._effect = np.sum(unpackbits(self.hidden2), 1)
+
         neuron_mask = np.where((self._effect == np.min(self._effect)).any() or (self._effect == np.max(self._effect)).any(), True, False)
         sub_neuron_mask = np.where((self._effects == np.min(self._effects, 0)).any() or (self._effects == np.max(self._effects, 0)).any(), True, False)
+        
         emit_mask = np.bitwise_and(neuron_mask, sub_neuron_mask)
-        match_mask = emit_mask
+        #match_mask = emit_mask
         # decay each of the final masks (unused as unsure of effect)
-        #match_mask = np.bitwise_and(np.copy(emit_mask), gen.choice((True,False), size=(4,self.width))).astype(bool)
-        #emit_mask = np.bitwise_and(emit_mask, gen.choice((True,False), size=(4,self.width))).astype(bool)
+        match_mask = np.bitwise_and(np.copy(emit_mask), gen.choice((True,False), size=(4,self.width))).astype(bool)
+        emit_mask = np.bitwise_and(emit_mask, gen.choice((True,False), size=(4,self.width))).astype(bool)
 
 
-
-        match_hurl = gen.integers(np.iinfo(self.itype).max, size=(4, self.width), endpoint=True, dtype=self.itype)
-        emit_hurl = gen.integers(np.iinfo(self.otype).max, size=(4, self.width), endpoint=True, dtype=self.otype)
+        #match_hurl = gen.integers(np.iinfo(self.itype).max, size=(4, self.width), endpoint=True, dtype=self.itype)
+        #emit_hurl = gen.integers(np.iinfo(self.otype).max, size=(4, self.width), endpoint=True, dtype=self.otype)
+        # Match slowly converges into forward
+        # Emit slowly converges into result
+        match_hurl = ~(self.match ^ lop)
+        emit_hurl = ~(result ^ target)
 
         # TODO test if I can mutate the match and emit
-        # TODO is it possible to figure out which bits to invert in emit instead of randomness
         self.match = np.where(match_mask, ~np.bitwise_xor(self.match, match_hurl), self.match)
         self.emit = np.where(emit_mask, ~np.bitwise_xor(self.emit, emit_hurl), self.emit)
 
 
-    def effect(self) -> np.ndarray:
-        self._effects = np.sum(unpackbits(np.bitwise_xor(self.hidden, np.reshape(self.hidden, (1,4,self.width)))), (1,3)) // 3
-        # Above is considered the effects within the array, below is the effects of the array
-        self._effect = np.sum(unpackbits(self.hidden2), 1)
-        return self._effect
+
 
     @property
     def arrays(self):
