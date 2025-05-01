@@ -4,8 +4,7 @@ from time import time
 from neurray2 import Neurray, unpackbits
 
 if __name__ == "__main__":
-    args = (1, 1, np.uint8, np.uint8)
-    #assert args[1] > 1
+    args = (2, 2, np.uint8, np.uint8)
     eliv = Neurray(*args)
     given = np.empty((args[0],args[1]), dtype=args[2])
     target = np.empty((args[0],args[1]), dtype=args[3])
@@ -14,11 +13,11 @@ if __name__ == "__main__":
     generations = 0
     mutations = 0
 
-    given[0] = 42 
-    #given[1] = 69
+    given[0] = 42, 69
+    given[1] = 24, 96
 
-    target[0] = 69
-    #target[1] = 42
+    target[0] = 69, 42
+    target[1] = 96, 24
 
     eliv.init_array()
     eliv.allocate_training()
@@ -33,23 +32,11 @@ if __name__ == "__main__":
         fitness = np.sum(unpackbits(~np.bitwise_xor(result, target)))
         generations += 1
         if fitness == max_fitness:
-            mutations += 1
             break
         if fitness > prev_fitness:
             prev_fitness = fitness
-            mutations += 1
-            #print(eliv.forward(given))
         eliv.backward(target)
 
     end = time()
-    print(f"{generations}/{mutations}")
-    print(f"{round(end - start, 4)} seconds")
-    #print(eliv.arrays)
-    results = {}
-
-    
-
-
-
-
-
+    print(f"""{args[0]} neuron{'s' if args[0]-1 else ''} | {args[1]} target{'s' if args[1]-1 else ''} | {generations} pass{'es' if generations-1 else ''} | {round((end - start) * 10_000, 1)} µs""")
+    #print(eliv.forward(given))

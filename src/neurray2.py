@@ -56,12 +56,15 @@ class Neurray:
         # NOTE could be collapsed if desired, but kept for ease of testing atm
         ## Something is preventing this from being collapsed atm
 
-        self.choices[0] = (inputs & self.match[0]) == 0
-        self.choices[1] = (inputs & self.match[1]) == 0
-        self.choices[2] = (inputs & self.match[2]) == 0
-        self.choices[3] = (inputs & self.match[3]) == 0
+        match = np.reshape(self.match, (4, self.neurons, 1))
 
-        self.hidden_states = np.where(self.choices, (emits := np.reshape(self.emit, (4,self.batch_size,1))), ~emits)
+        self.choices[0] = (inputs & match[0]) == 0
+        self.choices[1] = (inputs & match[1]) == 0
+        self.choices[2] = (inputs & match[2]) == 0
+        self.choices[3] = (inputs & match[3]) == 0
+
+        self.hidden_states = np.where(self.choices, (emits := np.reshape(self.emit, (4,self.neurons,1))), ~emits)
+
 
 
         outputs = np.copy(self.base)
@@ -98,13 +101,12 @@ class Neurray:
         
         # Calculate all parts of the masks
         states_mask = (states_effects == np.min(states_effects, 0)) | (states_effects == np.max(states_effects, 0))
-        neuron_mask = (neuron_effects == np.min(neuron_effects)) | (states_effects == np.max(neuron_effects))
 
         emit_decay  = gen.choice((True,False), size=(4,self.neurons))
         match_decay = gen.choice((True,False), size=(4,self.neurons))
 
-        emit_mask  = states_mask & neuron_mask & emit_decay
-        match_mask = states_mask & neuron_mask & match_decay
+        emit_mask  = states_mask & emit_decay
+        match_mask = states_mask & match_decay
 
         # invert effects of matches that got inverted during forward pass
         match_states = np.where(self.choices, ~(matches := self.match.reshape(4,self.neurons,1)), matches)
@@ -115,9 +117,12 @@ class Neurray:
 
         self.match_window[...] = expected_match[...,0]
         self.emit_window[...]  = expected_emit[...,0]
+        assert expected_match[...,0].all() == expected_match[...,1].all()
         for batch in range(self.batch_size-1):
-            self.match_window[...] = ~(self.match_window ^ expected_match[...,batch+1])
-            self.emit_window[...] = ~(self.emit_window ^ expected_emit[...,batch+1])
+            prev_match = np.copy(self.match_window)
+            prev_emit = np.copy(self.emit_window)
+            self.match_window[...] = (self.match_window & expected_match[...,batch+1])
+            self.emit_window[...] = (self.emit_window & expected_emit[...,batch+1])
 
         self.match[...] = np.where(match_mask, ~(self.match ^ self.match_window), self.match)
         self.emit[...]  = np.where(emit_mask,  ~(self.emit ^ self.emit_window), self.emit)
