@@ -9,4 +9,4 @@ env/.direnv
 env/.pre-commit-config.yaml
 
 # pycache
-src/__pycache__
+*/__pycache__
