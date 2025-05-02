@@ -3,15 +3,6 @@ import numpy as np
 gen = np.random.default_rng()
 randarray = lambda size, dtype: gen.integers(np.iinfo(dtype).max, size=size, dtype=dtype)
 
-def unpackbits(x):
-    """
-    Reshapes the np.unpackbits function from a 1d binary array into the orginal dims + bits
-    """
-    bits = np.iinfo(x.dtype).bits
-    bytes = bits // 8
-    rshape = (*x.shape, bits)
-    output = np.unpackbits(x.astype(f">u{bytes}").view("u1")).reshape(rshape)
-    return output
 
 class Neurray:
     def __init__(self, neurons:int, batch_size:int, idtype=np.uint8, odtype=np.uint8):
@@ -36,6 +27,7 @@ class Neurray:
         self.results = np.empty((self.neurons, self.batch_size), dtype=self.odtype)
 
         # batch_size convergance, opted to just keep these around
+        self.neuron_window = np.empty((self.neurons), dtype=self.odtype)
         self.match_window = np.empty((4, self.neurons), dtype=self.idtype)
         self.emit_window = np.empty((4, self.neurons), dtype=self.odtype)
 
@@ -92,9 +84,13 @@ class Neurray:
 
     def backward(self, target:np.ndarray) -> None:
         assert self.training, "NN Inputs and Outputs are non existant, place this class in training mode first!"
-
-        # (neurons, batch_size, bits) -> (neurons) 
-        neuron_convergance = np.reshape(np.sum(unpackbits(self.results ^ target), (1,2)) != 0, (1, self.neurons))
+        
+        # check if neurons have already converged, inverting the result to use as a mask
+        output_diff = self.results ^ target
+        self.neuron_window[...] = output_diff[...,0]
+        for batch in range(self.batch_size-1):
+            self.neuron_window |= output_diff[...,batch+1]
+        neuron_convergance = np.reshape((self.neuron_window != 0), (1, self.neurons))
 
         # select parts to mutate
         emit_decay  = gen.choice((True,False), size=(4,self.neurons))
@@ -122,8 +118,8 @@ class Neurray:
         self.match_window[...] = expected_match[...,0]
         self.emit_window[...]  = expected_emit[...,0]
         for batch in range(self.batch_size-1):
-            self.match_window[...] = (self.match_window & expected_match[...,batch+1])
-            self.emit_window[...] = (self.emit_window & expected_emit[...,batch+1])
+            self.match_window &= expected_match[...,batch+1]
+            self.emit_window &= expected_emit[...,batch+1]
 
         # apply weight decay
         self.match_window[...] = np.where(match_hurl_decay, (self.match_window | randarray((4, self.neurons), self.idtype)), self.match_window)

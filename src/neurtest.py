@@ -1,10 +1,20 @@
 import numpy as np
 from time import time
 
-from neurray import Neurray, unpackbits
+from neurray import Neurray
+
+def unpackbits(x):
+    """
+    Reshapes the np.unpackbits function from a 1d binary array into the orginal dims + bits
+    """
+    bits = np.iinfo(x.dtype).bits
+    bytes = bits // 8
+    rshape = (*x.shape, bits)
+    output = np.unpackbits(x.astype(f">u{bytes}").view("u1")).reshape(rshape)
+    return output
 
 if __name__ == "__main__":
-    args = (1, 2, np.uint8, np.uint8)
+    args = (10000, 2, np.uint8, np.uint8)
     eliv = Neurray(*args)
     given = np.empty((args[0],args[1]), dtype=args[2])
     target = np.empty((args[0],args[1]), dtype=args[3])
@@ -47,4 +57,4 @@ if __name__ == "__main__":
             results[index] += 1
         else:
             results[index] = 0
-    print(len(results))
+    #print(len(results))
