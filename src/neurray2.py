@@ -70,15 +70,14 @@ class Neurray:
         outputs = np.copy(self.base)
 
         outputs ^= self.hidden_states[0]
-
-        outputs &= self.hidden_states[1]
         outputs[...] = ~outputs
 
-        outputs ^= self.hidden_states[2]
+        outputs |= self.hidden_states[1]
         outputs[...] = ~outputs
 
-        outputs |= self.hidden_states[3]
-        outputs[...] = ~outputs
+        outputs |= self.hidden_states[2]
+
+        outputs ^= self.hidden_states[3]
 
 
         if self.training:
@@ -92,21 +91,19 @@ class Neurray:
         assert self.can_train, "Properties needed for the backward pass have not been initalized yet!"
         assert self.training, "NN Inputs and NN Outputs are frozen, place this class in training mode first!"
 
-        # (4, 4, neurons, batch_size, bits) -> (4, neurons, batch_size) // 3 -> (4, neurons) // batch_size
-        states_effects = np.sum(np.sum(unpackbits(np.reshape(self.hidden_states, (4, 1, self.neurons, self.batch_size)) ^ np.reshape(self.hidden_states, (1, 4, self.neurons, self.batch_size))), (1,4)) // 3, 2) // self.batch_size
-
-        # (neurons, batch_size, bits) -> (neurons) // batch_size
-        neuron_effects = np.sum(unpackbits(self.results), (1,2)) // self.batch_size
-
-        
-        # Calculate all parts of the masks
-        states_mask = (states_effects == np.min(states_effects, 0)) | (states_effects == np.max(states_effects, 0))
+        # (neurons, batch_size, bits) -> (neurons) 
+        neuron_convergance = np.reshape(np.sum(unpackbits(self.results ^ target), (1,2)) != 0, (1, self.neurons))
 
         emit_decay  = gen.choice((True,False), size=(4,self.neurons))
         match_decay = gen.choice((True,False), size=(4,self.neurons))
 
-        emit_mask  = states_mask & emit_decay
-        match_mask = states_mask & match_decay
+        emit_hurl_decay  = gen.choice((True,False), size=(4,self.neurons))
+        match_hurl_decay = gen.choice((True,False), size=(4,self.neurons))
+        
+        emit_loss_mask  = emit_decay & neuron_convergance
+        match_loss_mask = match_decay & neuron_convergance
+        emit_hurl_mask = emit_decay & emit_hurl_decay & neuron_convergance
+        match_hurl_mask = match_decay & emit_hurl_decay & neuron_convergance
 
         # invert effects of matches that got inverted during forward pass
         match_states = np.where(self.choices, ~(matches := self.match.reshape(4,self.neurons,1)), matches)
@@ -117,12 +114,12 @@ class Neurray:
 
         self.match_window[...] = expected_match[...,0]
         self.emit_window[...]  = expected_emit[...,0]
-        assert expected_match[...,0].all() == expected_match[...,1].all()
         for batch in range(self.batch_size-1):
-            prev_match = np.copy(self.match_window)
-            prev_emit = np.copy(self.emit_window)
             self.match_window[...] = (self.match_window & expected_match[...,batch+1])
             self.emit_window[...] = (self.emit_window & expected_emit[...,batch+1])
 
-        self.match[...] = np.where(match_mask, ~(self.match ^ self.match_window), self.match)
-        self.emit[...]  = np.where(emit_mask,  ~(self.emit ^ self.emit_window), self.emit)
+        self.match_window[...] = np.where(match_hurl_decay, (self.match_window | randarray((4, self.neurons), self.idtype)), self.match_window)
+        self.emit_window[...] = np.where(emit_hurl_decay, (self.emit_window | randarray((4, self.neurons), self.odtype)), self.emit_window)
+
+        self.match[...] = np.where(match_loss_mask, ~(self.match ^ self.match_window), self.match)
+        self.emit[...]  = np.where(emit_loss_mask,  ~(self.emit ^ self.emit_window), self.emit)
