@@ -1,12 +1,12 @@
 # Devenv
-env/.devenv*
-env/devenv.local.nix
+.devenv/.devenv*
+.devenv/devenv.local.nix
 
 # direnv
-env/.direnv
+.devenv/.devenv
 
 # pre-commit
-env/.pre-commit-config.yaml
+devenv/.pre-commit-config.yaml
 
 # pycache
 */__pycache__
