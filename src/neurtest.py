@@ -28,13 +28,15 @@ if __name__ == "__main__":
     eliv.init_array()
     eliv.set_training()
 
+    #print(given, target)
+
     start = time()
-    for i in range(10):
+    for i in range(50):
     #while 1:
     #if 1:
         result = eliv.forward(given)
         generations += 1
-        if not prev_result is None and np.array_equal(result, target):
+        if not prev_result is None and np.equal(result, target).all():
             #pass
             break
         else:
@@ -43,7 +45,7 @@ if __name__ == "__main__":
 
     end = time()
     print(f"""{args[0]} neuron{'s' if args[0]-1 else ''} | {args2[0]} target{'s' if args2[0]-1 else ''} | {generations} pass{'es' if generations-1 else ''} | {round((end - start) * 1_000, 2)} ms""")
-    print(eliv.forward(given)[0])
-    print(np.unpackbits(eliv.forward(given)[0] ^ target[0]).reshape(args2[0],np.iinfo(args[2]).bits))
+    print(eliv.forward(given))
+    print(np.sum(np.unpackbits(eliv.forward(given) ^ target).reshape(args2[0],np.iinfo(args[2]).bits), 1))
    
     

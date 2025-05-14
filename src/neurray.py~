@@ -94,6 +94,12 @@ class Neurray:
 
         filtered_length = filtered_results.shape[0]
 
+        # select parts to mutate
+        # NOTE this has no real test at the moment so we are just picking something
+        match_decay = gen.choice((True,False), size=(4,filtered_length,1))
+
+        match_loss_mask = match_decay
+
 
         # invert effects of matches that got inverted during forward pass
         match_states = np.where(filtered_choices, ~filtered_match, filtered_match)
@@ -107,8 +113,8 @@ class Neurray:
         match_window = expected_match[...,0,None]
         emit_window = expected_emit[...,0,None]
 
-        #states_window = emit_states[...,0,None]
-        #target_window = filtered_target[...,0,None]
+        states_window = emit_states[...,0,None]
+        target_window = filtered_target[...,0,None]
 
         input_window = filtered_inputs[...,0,None]
         matching_window = match_states[...,0,None]
@@ -118,8 +124,8 @@ class Neurray:
             next_match = expected_match[...,batch+1,None]
             next_emit = expected_emit[...,batch+1,None]
 
-            #next_state = emit_states[...,batch+1,None]
-            #next_target = filtered_target[...,batch+1,None]
+            next_state = emit_states[...,batch+1,None]
+            next_target = filtered_target[...,batch+1,None]
 
             next_input = filtered_inputs[...,batch+1,None]
             next_matching = match_states[...,batch+1,None]
@@ -129,24 +135,22 @@ class Neurray:
             match_window = (match_window & next_match) ^ ~(match_window | ~next_match)
             emit_window = (emit_window & next_emit) ^ ~(match_window | ~next_emit)
 
-            # Edit these two (abandoned for now, sanity toll)
+            # Edit these two
             #states_window = ~(states_window | ~next_state) | ~(states_window ^ next_state)
             #target_window = ~(target_window | ~next_target) | ~(target_window ^ next_target)
-            
+            states_window = (states_window & ~next_state) ^ ~(states_window ^ next_state)
+            target_window = (target_window & ~next_target) ^ ~(target_window ^ next_target)
+
             # Don't touch (want to abuse this behavior later)
             input_window = (input_window & next_input) ^ ~(input_window | ~next_input)
             matching_window = (matching_window & next_matching) ^ ~(matching_window | ~next_matching)
 
 
-
-        # select parts to mutate
-        # NOTE this has no real test at the moment so we are just picking something
-        
-        # Works with batch_size 1, doesn't with higher
-        #emit_loss_mask = (~(states_window ^ emit_window) ^ target_window) < (states_window ^ target_window)
-        emit_loss_mask = gen.choice((True,False), size=(4,filtered_length,1))
-        
+        emit_loss_mask = (~(states_window ^ emit_window) ^ target_window) < (states_window ^ target_window)
+        #emit_loss_mask = match_decay
         match_loss_mask = (~(matching_window ^ match_window) ^ input_window) < (matching_window ^ input_window)
+
+        print(emit_loss_mask[...,0,0], match_loss_mask[...,0,0])
 
         # update the neurons
         self.match[...,neuron_convergance,0,None] = np.where(match_loss_mask, ~(filtered_match ^ match_window), filtered_match)
