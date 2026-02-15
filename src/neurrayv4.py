@@ -161,6 +161,7 @@ class U1XToU1X:
             ) > 0
             self.emit[:self.array_used, :self.group_used] |= case_group_union
 
+        new_case_indices = np.flatnonzero(new_case_mask)
         new_cases = diff[new_case_mask]
         new_case_groups = pending_groups[new_case_mask]
 
@@ -168,11 +169,18 @@ class U1XToU1X:
             kept = np.ones(new_cases.shape[0], dtype=np.bool_)
             fresh_group_used = False
             for idx, groups in enumerate(new_case_groups):
+                source_diff_idx = new_case_indices[idx]
+
                 if groups.any():
+                    self.emit[:self.array_used, :self.group_used] |= (
+                        existing_case_match_mask[source_diff_idx, :, None]
+                        & groups[None, :self.group_used]
+                    )
                     continue
 
                 if (not fresh_group_used) and self.group_used < self.group_size:
                     groups[self.group_used] = True
+                    self.emit[:self.array_used, self.group_used] |= existing_case_match_mask[source_diff_idx]
                     self.group_used += 1
                     fresh_group_used = True
                 else:
