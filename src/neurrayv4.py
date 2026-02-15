@@ -144,13 +144,22 @@ class U1XToU1X:
         # ASSIGN
         diff2 = diff[..., None] ^ self.match[None, ..., :self.array_used]
 
-        diffed_neg_mask = diff2[:, 0].any(axis=1).all(axis=0)
-        new_case_mask = diff2[:, 0].any(axis=1).all(axis=1)
+        diffed_pos = diff2[:, 0].any(axis=1)
+        diffed_neg_mask = diffed_pos.all(axis=0)
+        new_case_mask = diffed_pos.all(axis=1)
+        existing_case_match_mask = ~diffed_pos
 
         neg_case: np.ndarray = np.bitwise_and.reduce(diff[:, 1], axis=0)
 
         # APPLY
         self.match[..., :self.array_used][1, :, ~diffed_neg_mask] &= neg_case
+
+        if self.group_used and self.array_used and pending_groups.shape[0]:
+            case_group_union = (
+                existing_case_match_mask.T.astype(np.uint8, copy=False)
+                @ pending_groups[:, :self.group_used].astype(np.uint8, copy=False)
+            ) > 0
+            self.emit[:self.array_used, :self.group_used] |= case_group_union
 
         new_cases = diff[new_case_mask]
         new_case_groups = pending_groups[new_case_mask]
