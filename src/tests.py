@@ -13,9 +13,11 @@ def format_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> str:
         f"inputs={stats['total_inputs']} "
         f"diffs={stats['total_diffs']} "
         f"cases={stats['active_cases']} "
+        f"groups={stats['active_groups']} "
         f"avg_diffs/input={stats['avg_diffs_per_input']:.4f} "
         f"avg_case_acts/input={stats['avg_case_activations_per_input']:.4f} "
-        f"mean_acts/case={stats['mean_activations_per_case']:.2f}"
+        f"mean_acts/case={stats['mean_activations_per_case']:.2f} "
+        f"mean_cases/group={stats['mean_cases_per_group']:.2f}"
     )
 
 
@@ -25,7 +27,7 @@ def print_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> None:
 
 def sanity_test():
 
-    eliv = U1XToU1X(np.empty(4, dtype=np.uint8), cases=6)
+    eliv = U1XToU1X(np.empty(4, dtype=np.uint8), cases=6, groups=6)
 
     temp = np.array([[8, 0, 0, 0], [2,0,0,0], [4,0,0,0]], dtype=np.uint8)
 
@@ -113,7 +115,7 @@ def dataset(
 
     # we love setup being 4 seconds out of 28 second runtime on the poor laptop
 
-    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000) # case count inflated as chunking code was swapped for 7x7 tiles instead of 4x4
+    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000, groups=100_000) # case count inflated as chunking code was swapped for 7x7 tiles instead of 4x4
 
     counter = 0
 
