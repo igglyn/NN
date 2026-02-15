@@ -170,17 +170,30 @@ class U1XToU1X:
             fresh_group_used = False
             for idx, groups in enumerate(new_case_groups):
                 source_diff_idx = new_case_indices[idx]
+                surrounding_case_mask = existing_case_match_mask[source_diff_idx]
 
-                if groups.any():
-                    self.emit[:self.array_used, :self.group_used] |= (
-                        existing_case_match_mask[source_diff_idx, :, None]
-                        & groups[None, :self.group_used]
-                    )
+                common_surrounding_groups = np.zeros(self.group_used, dtype=np.bool_)
+                if self.group_used and np.any(surrounding_case_mask):
+                    surrounding_emit = self.emit[:self.array_used, :self.group_used][surrounding_case_mask]
+                    common_surrounding_groups = np.bitwise_and.reduce(surrounding_emit, axis=0)
+
+                if self.group_used and groups[:self.group_used].any():
+                    if np.any(surrounding_case_mask):
+                        groups[:self.group_used] &= common_surrounding_groups
+                    if groups[:self.group_used].any():
+                        continue
+                    kept[idx] = False
+                    continue
+
+                if np.any(surrounding_case_mask):
+                    if common_surrounding_groups.any():
+                        groups[:self.group_used] = common_surrounding_groups
+                        continue
+                    kept[idx] = False
                     continue
 
                 if (not fresh_group_used) and self.group_used < self.group_size:
                     groups[self.group_used] = True
-                    self.emit[:self.array_used, self.group_used] |= existing_case_match_mask[source_diff_idx]
                     self.group_used += 1
                     fresh_group_used = True
                 else:
