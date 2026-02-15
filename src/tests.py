@@ -48,6 +48,8 @@ def dataset(
     report_every: int = 1000,
     reporter: Callable[[str], None] | None = print,
     reset_stats_between_stages: bool = True,
+    shuffle_train: bool = False,
+    shuffle_seed: int | None = None,
 ):
     import tensorflow_datasets as tfds
 
@@ -107,6 +109,15 @@ def dataset(
     tiles_train = recast_u64(tiles_train)
     tiles_eval = recast_u64(tiles_eval)
 
+    if shuffle_train:
+        rng = np.random.default_rng(shuffle_seed)
+        permutation = rng.permutation(tiles_train.shape[0])
+        tiles_train = tiles_train[permutation]
+
+        if reporter:
+            seed_display = shuffle_seed if shuffle_seed is not None else "random"
+            reporter(f"Shuffled training dataset order with seed={seed_display}")
+
     all_tiles_train = tiles_train.reshape(tiles_train.shape[0] * tiles_train.shape[1], tiles_train.shape[2])
     all_tiles = np.unique(all_tiles_train, axis=0)
     if reporter:
@@ -134,7 +145,7 @@ def dataset(
 
     if reporter:
         reporter(format_debug_stats(neur, prefix="train-final"))
-        reporter(f"\n\n{neur.array_used} cases used!\nMoving into validation\n")
+        reporter(f"\n\n{neur.array_used} cases used! {neur.group_used} groups used!\nMoving into validation\n")
     # 811 as is
 
     if reset_stats_between_stages:
@@ -158,6 +169,38 @@ def dataset(
     return neur, misses
 
 
+def dataset_shuffle_trials(
+    reruns: int,
+    report_every: int,
+    reporter: Callable[[str], None] | None,
+    reset_stats_between_stages: bool,
+    shuffle_seed: int | None,
+) -> list[tuple[int, int, int]]:
+    summaries: list[tuple[int, int, int]] = []
+
+    for run in range(reruns):
+        run_seed = None if shuffle_seed is None else shuffle_seed + run
+        if reporter:
+            reporter(f"\n=== shuffled run {run + 1}/{reruns} ===")
+
+        neur, misses = dataset(
+            report_every=report_every,
+            reporter=reporter,
+            reset_stats_between_stages=reset_stats_between_stages,
+            shuffle_train=True,
+            shuffle_seed=run_seed,
+        )
+
+        summaries.append((neur.array_used, neur.group_used, misses))
+
+        if reporter:
+            reporter(
+                f"run {run + 1} summary: cases={neur.array_used} groups={neur.group_used} misses={misses}"
+            )
+
+    return summaries
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run NN structural engine diagnostics")
     parser.add_argument("--mode", choices=("dataset", "sanity"), default="dataset")
@@ -172,17 +215,53 @@ def main() -> None:
         action="store_true",
         help="Keep debug counters cumulative across training and evaluation.",
     )
+    parser.add_argument(
+        "--shuffle-train",
+        action="store_true",
+        help="Shuffle training dataset order before training.",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=None,
+        help="Seed for training shuffle order. If omitted, uses random order.",
+    )
+    parser.add_argument(
+        "--reruns",
+        type=int,
+        default=1,
+        help="Number of times to rerun dataset mode (useful with --shuffle-train).",
+    )
     args = parser.parse_args()
 
     if args.mode == "sanity":
         sanity_test()
         return
 
-    dataset(
+    if args.reruns < 1:
+        raise ValueError("--reruns must be >= 1")
+
+    if args.reruns == 1:
+        dataset(
+            report_every=args.report_every,
+            reporter=print,
+            reset_stats_between_stages=not args.no_reset_between_stages,
+            shuffle_train=args.shuffle_train,
+            shuffle_seed=args.shuffle_seed,
+        )
+        return
+
+    summaries = dataset_shuffle_trials(
+        reruns=args.reruns,
         report_every=args.report_every,
         reporter=print,
         reset_stats_between_stages=not args.no_reset_between_stages,
+        shuffle_seed=args.shuffle_seed,
     )
+
+    print("\n=== rerun summary ===")
+    for run, (cases, groups, misses) in enumerate(summaries, start=1):
+        print(f"run {run}: cases={cases} groups={groups} misses={misses}")
 
 
 if __name__ == "__main__":
