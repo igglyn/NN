@@ -13,9 +13,11 @@ def format_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> str:
         f"inputs={stats['total_inputs']} "
         f"diffs={stats['total_diffs']} "
         f"cases={stats['active_cases']} "
+        f"total_groups={stats['total_groups']} "
         f"avg_diffs/input={stats['avg_diffs_per_input']:.4f} "
         f"avg_case_acts/input={stats['avg_case_activations_per_input']:.4f} "
-        f"mean_acts/case={stats['mean_activations_per_case']:.2f}"
+        f"mean_acts/case={stats['mean_activations_per_case']:.2f} "
+        f"cases/group={stats['mean_cases_in_group']:.2f} "
     )
 
 
@@ -25,20 +27,25 @@ def print_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> None:
 
 def sanity_test():
 
-    eliv = U1XToU1X(np.empty(4, dtype=np.uint8), cases=6)
+    eliv = U1XToU1X(np.empty(4, dtype=np.uint8), cases=6, groups=6)
 
     temp = np.array([[8, 0, 0, 0], [2,0,0,0], [4,0,0,0]], dtype=np.uint8)
 
-    rev = eliv.forward(temp)
-    eliv.assign(rev)
+    rev, emi, mat = eliv.forward(temp)
+    eliv.assign(rev, emi, mat)
     print(eliv.array_used) # 3 cases
 
-    rev = eliv.forward(np.array([[9, 0, 0, 0], [12,0,0,0], [14,0,0,0]], dtype=np.uint8))
-    eliv.assign(rev)
+    rev, emi, mat = eliv.forward(np.array([[9, 0, 0, 0], [12,0,0,0], [14,0,0,0]], dtype=np.uint8))
+    eliv.assign(rev, emi, mat)
     print(eliv.array_used) # 4 cases (adding [1, 0, 0, 0])
 
-    rev = eliv.forward(np.array([[9, 0, 0, 0], [12,0,0,0], [14,0,0,0]], dtype=np.uint8))
+    rev, emi, mat = eliv.forward(np.array([[9, 0, 0, 0], [12,0,0,0], [14,0,0,0]], dtype=np.uint8))
     print(eliv.array_used) # 4 cases (It's identical after all)
+
+    rev, emi, mat = eliv.forward(np.array([[16, 0, 0, 0], [8,0,0,0], [4,0,0,0]], dtype=np.uint8))
+    print(eliv.array_used) # 4 cases (It's identical after all)
+
+
 
 
 
@@ -105,7 +112,13 @@ def dataset(
     tiles_train = recast_u64(tiles_train)
     tiles_eval = recast_u64(tiles_eval)
 
+    print(tiles_train.shape)
+    gen = np.random.default_rng()
+    gen.shuffle(tiles_train, axis=0)
+
     all_tiles_train = tiles_train.reshape(tiles_train.shape[0] * tiles_train.shape[1], tiles_train.shape[2])
+
+
     all_tiles = np.unique(all_tiles_train, axis=0)
     if reporter:
         reporter(f"{all_tiles.shape[0]} total unique tiles")
@@ -113,7 +126,7 @@ def dataset(
 
     # we love setup being 4 seconds out of 28 second runtime on the poor laptop
 
-    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000) # case count inflated as chunking code was swapped for 7x7 tiles instead of 4x4
+    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000, groups=40) # case count inflated as chunking code was swapped for 7x7 tiles instead of 4x4
 
     counter = 0
 
@@ -121,9 +134,11 @@ def dataset(
         if reporter and report_every > 0 and counter % report_every == 0:
             reporter(f"training at: {counter}")
             reporter(format_debug_stats(neur, prefix="train"))
-        rev = neur.forward(tile)
+            if counter > 10000:
+                break
+        rev, emi, mat = neur.forward(tile)
         try:
-            neur.assign(rev)
+            neur.assign(rev, emi, mat)
         except AssertionError:
             if reporter:
                 reporter(f"Broke at: {counter}, ran out out of cases\n")
@@ -144,7 +159,7 @@ def dataset(
         if reporter and report_every > 0 and counter % report_every == 0:
             reporter(f"eval at: {counter}")
             reporter(format_debug_stats(neur, prefix="eval"))
-        rev = neur.forward(tile)
+        rev, _, _ = neur.forward(tile)
         misses += rev.shape[0]
         counter += 1
 

@@ -1,27 +1,34 @@
+from xxlimited import new
 import numpy as np
 
-from neurtypes import Case, State, Diff
+from neurtypes import Case, State, Diff, Emit
 
 class U1XToU1X:
-    def __init__(self, match_slot:Case, cases:int) -> None:
+    def __init__(self, match_slot:Case, cases:int, groups:int) -> None:
         assert len(match_slot.shape) == 1, "malformed case"
 
         self.array_size = cases
         self.array_used = 0
 
+        self.emit_size = groups
+        self.emit_used = 0
+
         self.match = np.zeros((2, match_slot.shape[0], self.array_size), dtype=match_slot.dtype)
+
+        self.emit = np.zeros((self.array_size, groups), dtype=np.bool_)
 
         # Debug stats
         self.debug_case_activations = np.zeros(self.array_size, dtype=np.uint64)
         self.reset_debug_stats()
 
     # This is forward + reverse passes
-    def forward(self, tokens:State) -> Diff:
+    def forward(self, tokens:State) -> tuple[Diff, Emit, np.ndarray]:
         assert tokens.dtype == self.match.dtype
         assert tokens.shape[1] == self.match.shape[1]
 
 
         match_view = self.match[None, ..., :self.array_used]
+        emit_view = self.emit[None, :self.array_used]
 
         tokens_inv = ~tokens.copy()
         input: Diff = np.stack((tokens, tokens_inv), axis=1)
@@ -30,6 +37,14 @@ class U1XToU1X:
         selection = input[..., None] & match_view
 
         choices: np.ndarray = (selection == match_view).all((1,2))
+
+        emit_mask: np.ndarray = self.emit[:self.array_used].any(axis=1)
+
+        # this one is the merge flag
+        was_matched = choices.any(axis=1)
+        emit_broad = np.broadcast_to(emit_view, (choices.shape[0], self.array_used, self.emit_size))
+        # we love jank (if nothing matches, it'll be true becasuse the inital true is not compared to anything)
+        emit: Emit = np.bitwise_and.reduce(emit_broad, axis=1, where=choices[..., None] & emit_mask[None, :, None]) & was_matched[..., None]
 
         if self.array_used:
             case_hits = np.count_nonzero(choices, axis=0).astype(np.uint64, copy=False)
@@ -42,16 +57,21 @@ class U1XToU1X:
 
         diff: Diff = reverse & input ^ input
         # removing [[0, ..., 0][0, ..., 0]] instances, because harmful to compute
-        diff_cul: Diff = diff[diff[:, 0].any(axis=1)]
+        non_zero = diff[:, 0].any(axis=1)
+        diff_cul: Diff = diff[non_zero]
+        emit_cul: Emit = emit[non_zero]
+        was_matched_cul = was_matched[non_zero]
 
         # dedupe as assign will blindly add multipule indentical cases otherwise
-        diff_cul2: Diff = np.unique(diff_cul, axis=0)
+        diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
+        emit_cul2 = emit_cul[idxs]
+        was_matched_cul2 = was_matched_cul[idxs]
 
         self.debug_forward_calls += 1
         self.debug_total_inputs += int(tokens.shape[0])
         self.debug_total_diffs += int(diff_cul2.shape[0])
 
-        return diff_cul2
+        return diff_cul2, emit_cul2, was_matched_cul2
 
     def debug_snapshot(self) -> dict[str, float | int]:
         avg_diffs_per_forward = 0.0
@@ -66,19 +86,24 @@ class U1XToU1X:
 
         active_case_activations = self.debug_case_activations[:self.array_used]
         case_activation_mean = 0.0
+        group_case_count_mean = 0.0
         if self.array_used:
             case_activation_mean = float(active_case_activations.mean())
+        if self.emit_used:
+            group_case_count_mean = float(np.sum(self.emit[..., :self.emit_used], axis=0, dtype=np.uint16).mean())
 
         return {
             "forward_calls": self.debug_forward_calls,
             "total_inputs": self.debug_total_inputs,
             "total_diffs": self.debug_total_diffs,
             "total_case_activations": self.debug_total_case_activations,
+            "total_groups": self.emit_used,
             "active_cases": self.array_used,
             "avg_diffs_per_forward": avg_diffs_per_forward,
             "avg_diffs_per_input": avg_diffs_per_input,
             "avg_case_activations_per_input": avg_case_activations_per_input,
             "mean_activations_per_case": case_activation_mean,
+            "mean_cases_in_group": group_case_count_mean,
         }
 
     def debug_case_activation_counts(self) -> np.ndarray:
@@ -92,26 +117,43 @@ class U1XToU1X:
         self.debug_case_activations.fill(0)
 
     # This is assign and apply
-    def assign(self, diff:Diff) -> None:
+    def assign(self, diff:Diff, emit:Emit, was_matched:np.ndarray) -> None:
         assert diff.shape[1] == 2, "diff is malformed"
         assert diff.shape[2] == self.match.shape[1], "case is mismatched"
 
-
         # ASSIGN
         diff2 = diff[..., None] ^ self.match[None, ..., :self.array_used]
+        emit2 = emit[None] & self.emit[:self.array_used, None, :]
 
         diffed_neg_mask = diff2[:, 0].any(axis=1).all(axis=0)
         new_case_mask = diff2[:, 0].any(axis=1).all(axis=1)
+
+
+        #diffed_mutate_mask = diff2[:, 0].all(axis=1).all(axis=0)
 
         neg_case: np.ndarray = np.bitwise_and.reduce(diff[:, 1], axis=0)
 
         # APPLY
         self.match[..., :self.array_used][1, :, ~diffed_neg_mask] &= neg_case
+        #self.emit[:self.array_used][diffed_mutate_mask] = emit[~new_case_mask & was_matched]
 
-        new_cases = diff[new_case_mask]
+        new_cases = diff[new_case_mask & was_matched]
+
 
         assert self.array_used + new_cases.shape[0] <= self.array_size
         self.match[..., self.array_used:self.array_used+new_cases.shape[0]] = np.permute_dims(new_cases, (1,2,0))
         self.match[1, :, self.array_used:self.array_used+new_cases.shape[0]] &= neg_case[..., None]
+        self.emit[self.array_used:self.array_used+new_cases.shape[0]] = emit[new_case_mask & was_matched]
 
         self.array_used += new_cases.shape[0]
+
+        new_group_cases = diff[new_case_mask & ~was_matched]
+
+        if new_group_cases.shape[0]:
+            assert self.array_used + 1 <= self.array_size
+            self.emit_used += 1
+
+            self.match[..., self.array_used] = np.permute_dims(new_group_cases[0], (0,1))
+            self.match[1, :, self.array_used] &= neg_case
+            self.emit[self.array_used, self.emit_used] = True
+            self.array_used += 1
