@@ -8,4 +8,4 @@ State: TypeAlias = Annotated[np.ndarray[tuple[int, int], np.dtype[np.unsignedint
 
 Diff: TypeAlias = np.ndarray[tuple[int, Literal[2], int], np.dtype[np.unsignedinteger]]
 
-Emit: TypeAlias = np.ndarray[tuple[int, int], np.dtype[np.uint64]]
+Emit: TypeAlias = np.ndarray[tuple[int, Literal[2], int], np.dtype[np.uint64]]

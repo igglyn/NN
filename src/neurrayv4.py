@@ -16,21 +16,28 @@ class U1XToU1X:
 
         self.match = np.zeros((2, match_slot.shape[0], self.array_size), dtype=match_slot.dtype)
 
-        self.emit = np.zeros((self.array_size, self.emit_words), dtype=np.uint64)
+        self.emit = np.zeros((2, self.array_size, self.emit_words), dtype=np.uint64)
 
         # Debug stats
         self.debug_case_activations = np.zeros(self.array_size, dtype=np.uint64)
         self.reset_debug_stats()
 
-    def _set_emit_group_bit(self, case_idx: int, group_idx: int) -> None:
-            # This is forward + reverse passes
+    def _set_emit_group_bit(self, case_idx: int | slice, group_idx: int, *, is_member: bool) -> None:
+        assert 0 <= group_idx < self.emit_size, "emit group index out of bounds"
+        word_line, bit_shift = divmod(group_idx, 64)
+        group_bit = np.uint64(1) << np.uint64(bit_shift)
+
+        plane = 0 if is_member else 1
+        self.emit[plane, case_idx, word_line] |= group_bit
+
+    # this is forward and reverse
     def forward(self, tokens:State) -> tuple[Diff, Emit, np.ndarray]:
         assert tokens.dtype == self.match.dtype
         assert tokens.shape[1] == self.match.shape[1]
 
 
         match_view = self.match[None, ..., :self.array_used]
-        emit_view = self.emit[None, :self.array_used]
+        emit_view = self.emit[None, :, :self.array_used]
 
         tokens_inv = ~tokens.copy()
         input: Diff = np.stack((tokens, tokens_inv), axis=1)
@@ -40,13 +47,20 @@ class U1XToU1X:
 
         choices: np.ndarray = (selection == match_view).all((1,2))
 
-        emit_mask: np.ndarray = self.emit[:self.array_used].any(axis=1)
+        emit_mask: np.ndarray = self.emit[:, :self.array_used].any(axis=(0, 2))
 
         # this one is the merge flag
         was_matched = choices.any(axis=1)
-        emit_broad = np.broadcast_to(emit_view, (choices.shape[0], self.array_used, self.emit_words))
+        emit_broad = np.broadcast_to(
+            emit_view,
+            (choices.shape[0], 2, self.array_used, self.emit_words),
+        )
         # we love jank (if nothing matches, it'll be true becasuse the inital true is not compared to anything)
-        emit: Emit = np.bitwise_and.reduce(emit_broad, axis=1, where=choices[..., None] & emit_mask[None, :, None])
+        emit: Emit = np.bitwise_and.reduce(
+            emit_broad,
+            axis=2,
+            where=choices[:, None, :, None] & emit_mask[None, None, :, None],
+        )
         emit[~was_matched] = np.uint64(0)
 
         if self.array_used:
@@ -93,7 +107,7 @@ class U1XToU1X:
         if self.array_used:
             case_activation_mean = float(active_case_activations.mean())
         if self.emit_used:
-            active_case_emit = self.emit[:self.array_used]
+            active_case_emit = self.emit[0, :self.array_used]
             group_case_counts = np.empty(self.emit_used, dtype=np.uint32)
             for group_idx in range(self.emit_used):
                 word_idx, bit_idx = divmod(group_idx, 64)
@@ -136,22 +150,20 @@ class U1XToU1X:
         diffed_neg_mask = diff2[:, 0].any(axis=1).all(axis=0)
         new_case_mask = diff2[:, 0].any(axis=1).all(axis=1)
 
-
-        #diffed_mutate_mask = diff2[:, 0].all(axis=1).all(axis=0)
-
         neg_case: np.ndarray = np.bitwise_and.reduce(diff[:, 1], axis=0)
 
         # APPLY
         self.match[..., :self.array_used][1, :, ~diffed_neg_mask] &= neg_case
-        #self.emit[:self.array_used][diffed_mutate_mask] = emit[~new_case_mask & was_matched]
 
         new_cases = diff[new_case_mask & was_matched]
-
 
         assert self.array_used + new_cases.shape[0] <= self.array_size
         self.match[..., self.array_used:self.array_used+new_cases.shape[0]] = np.permute_dims(new_cases, (1,2,0))
         self.match[1, :, self.array_used:self.array_used+new_cases.shape[0]] &= neg_case[..., None]
-        self.emit[self.array_used:self.array_used+new_cases.shape[0]] = emit[new_case_mask & was_matched]
+        self.emit[:, self.array_used:self.array_used+new_cases.shape[0]] = np.permute_dims(
+            emit[new_case_mask & was_matched],
+            (1, 0, 2),
+        )
 
         self.array_used += new_cases.shape[0]
 
@@ -159,12 +171,21 @@ class U1XToU1X:
 
         if new_group_cases.shape[0]:
             assert self.array_used + 1 <= self.array_size
+            assert self.emit_used < self.emit_size, "emit group index out of bounds"
+
+            new_group_idx = self.emit_used
             self.emit_used += 1
 
             self.match[..., self.array_used] = np.permute_dims(new_group_cases[0], (0,1))
             self.match[1, :, self.array_used] &= neg_case
 
-            assert 0 <= self.emit_used < self.emit_size, "emit group index out of bounds"
-            word_line, bit_shift = divmod(self.emit_used, 64)
-            self.emit[self.array_used, word_line] |= np.uint64(1) << np.uint64(bit_shift)
+            self._set_emit_group_bit(self.array_used, new_group_idx, is_member=True)
+
+            if new_group_idx:
+                full_words, rem_bits = divmod(new_group_idx, 64)
+                self.emit[1, self.array_used, :full_words] = np.iinfo(np.uint64).max
+                if rem_bits:
+                    self.emit[1, self.array_used, full_words] |= (np.uint64(1) << np.uint64(rem_bits)) - np.uint64(1)
+
+            self._set_emit_group_bit(slice(None, self.array_used), new_group_idx, is_member=False)
             self.array_used += 1
