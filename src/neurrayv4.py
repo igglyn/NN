@@ -104,6 +104,8 @@ class U1XToU1X:
         active_case_activations = self.debug_case_activations[:self.array_used]
         case_activation_mean = 0.0
         group_case_count_mean = 0.0
+        group_neg_case_count_mean = 0.0
+
         if self.array_used:
             case_activation_mean = float(active_case_activations.mean())
         if self.emit_used:
@@ -115,6 +117,15 @@ class U1XToU1X:
                     ((active_case_emit[:, word_idx] >> np.uint64(bit_idx)) & np.uint64(1))
                 )
             group_case_count_mean = float(group_case_counts.mean())
+        if self.emit_used:
+            active_case_emit = self.emit[1, :self.array_used]
+            group_case_counts = np.empty(self.emit_used, dtype=np.uint32)
+            for group_idx in range(self.emit_used):
+                word_idx, bit_idx = divmod(group_idx, 64)
+                group_case_counts[group_idx] = np.count_nonzero(
+                    ((active_case_emit[:, word_idx] >> np.uint64(bit_idx)) & np.uint64(1))
+                )
+            group_neg_case_count_mean = float(group_case_counts.mean())
 
         return {
             "forward_calls": self.debug_forward_calls,
@@ -128,6 +139,7 @@ class U1XToU1X:
             "avg_case_activations_per_input": avg_case_activations_per_input,
             "mean_activations_per_case": case_activation_mean,
             "mean_cases_in_group": group_case_count_mean,
+            "mean_neg_cases_in_group": group_neg_case_count_mean
         }
 
     def debug_case_activation_counts(self) -> np.ndarray:
@@ -160,10 +172,14 @@ class U1XToU1X:
         assert self.array_used + new_cases.shape[0] <= self.array_size
         self.match[..., self.array_used:self.array_used+new_cases.shape[0]] = np.permute_dims(new_cases, (1,2,0))
         self.match[1, :, self.array_used:self.array_used+new_cases.shape[0]] &= neg_case[..., None]
-        self.emit[:, self.array_used:self.array_used+new_cases.shape[0]] = np.permute_dims(
-            emit[new_case_mask & was_matched],
-            (1, 0, 2),
-        )
+
+        emit_shift = np.permute_dims(
+                    emit[new_case_mask & was_matched],
+                    (1, 0, 2),
+                )
+
+        self.emit[0, self.array_used:self.array_used+new_cases.shape[0]] |= emit_shift[0]
+        self.emit[1, self.array_used:self.array_used+new_cases.shape[0]] &= emit_shift[1]
 
         self.array_used += new_cases.shape[0]
 

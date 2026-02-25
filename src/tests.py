@@ -18,6 +18,7 @@ def format_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> str:
         f"avg_case_acts/input={stats['avg_case_activations_per_input']:.4f} "
         f"mean_acts/case={stats['mean_activations_per_case']:.2f} "
         f"cases/group={stats['mean_cases_in_group']:.2f} "
+        f"ncases/group={stats['mean_neg_cases_in_group']:.2f} "
     )
 
 
