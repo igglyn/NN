@@ -1,4 +1,3 @@
-from xxlimited import new
 import numpy as np
 
 from neurtypes import Case, State, Diff, Emit
@@ -17,6 +16,12 @@ class U1XToU1X:
         self.match = np.zeros((2, match_slot.shape[0], self.array_size), dtype=match_slot.dtype)
 
         self.emit = np.zeros((2, self.array_size, self.emit_words), dtype=np.uint64)
+        self.group_emit_pos = np.zeros((self.emit_size, self.match.shape[1]), dtype=self.match.dtype)
+        self.group_emit_neg = np.full(
+            (self.emit_size, self.match.shape[1]),
+            np.iinfo(self.match.dtype).max,
+            dtype=self.match.dtype,
+        )
 
         # Debug stats
         self.debug_case_activations = np.zeros(self.array_size, dtype=np.uint64)
@@ -30,22 +35,111 @@ class U1XToU1X:
         plane = 0 if is_member else 1
         self.emit[plane, case_idx, word_line] |= group_bit
 
+    def _case_pos_mask(self) -> np.ndarray:
+        return self.match[0, :, :self.array_used].any(axis=0)
+
+    def _input_neg_observed(self, tokens: State) -> np.ndarray:
+        return ~tokens
+
+    def _match_choices(self, tokens: State) -> tuple[np.ndarray, Diff]:
+        match_view = self.match[None, ..., :self.array_used]
+        tokens_inv = self._input_neg_observed(tokens)
+        input_bits: Diff = np.stack((tokens, tokens_inv), axis=1)
+
+        selection = input_bits[..., None] & match_view
+        choices: np.ndarray = (selection == match_view).all((1, 2))
+
+        if self.array_used:
+            # Groupless safeguard: a case needs at least one positive constraint bit.
+            choices &= self._case_pos_mask()[None, :]
+
+        return choices, input_bits
+
+    def _group_ids_for_case(self, case_idx: int) -> list[int]:
+        ids: list[int] = []
+        for word_idx, word in enumerate(self.emit[0, case_idx]):
+            value = int(word)
+            while value:
+                bit = (value & -value).bit_length() - 1
+                group_idx = word_idx * 64 + bit
+                if group_idx < self.emit_used:
+                    ids.append(group_idx)
+                value &= value - 1
+        return ids
+
+    def _bit_count_sum(self, values: np.ndarray) -> np.ndarray:
+        if hasattr(np, "bit_count"):
+            return np.bit_count(values).sum(axis=1, dtype=np.int64)
+        unpacked = np.unpackbits(values.view(np.uint8), axis=1)
+        return unpacked.sum(axis=1, dtype=np.int64)
+
+    def _case_match_score(self, tokens: State, case_idx: int) -> np.ndarray:
+        pos_overlap = self._bit_count_sum(np.bitwise_and(tokens, self.match[0, :, case_idx]))
+        neg_overlap = self._bit_count_sum(np.bitwise_and(tokens, self.match[1, :, case_idx]))
+        return pos_overlap - neg_overlap
+
+    def _group_emit_for_choices(
+        self,
+        tokens: State,
+        choices: np.ndarray,
+        *,
+        update_gate: bool,
+        confidence_case_count: int,
+        match_score_threshold: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        batch = tokens.shape[0]
+        pos_emit = np.zeros((batch, self.match.shape[1]), dtype=self.match.dtype)
+        neg_emit = np.full((batch, self.match.shape[1]), np.iinfo(self.match.dtype).max, dtype=self.match.dtype)
+        matched = choices.any(axis=1)
+
+        for sample_idx in range(batch):
+            fired_cases = np.flatnonzero(choices[sample_idx])
+            if fired_cases.size == 0:
+                neg_emit[sample_idx] = np.zeros(self.match.shape[1], dtype=self.match.dtype)
+                continue
+
+            group_case_counts = np.zeros(self.emit_used, dtype=np.uint16)
+            group_score = np.full(self.emit_used, -np.iinfo(np.int32).max, dtype=np.int32)
+            sample_groups: set[int] = set()
+
+            for case_idx in fired_cases:
+                score = int(self._case_match_score(tokens[sample_idx:sample_idx + 1], int(case_idx))[0])
+                for group_idx in self._group_ids_for_case(int(case_idx)):
+                    sample_groups.add(group_idx)
+                    group_case_counts[group_idx] += 1
+                    if score > group_score[group_idx]:
+                        group_score[group_idx] = score
+
+            if not sample_groups:
+                neg_emit[sample_idx] = np.zeros(self.match.shape[1], dtype=self.match.dtype)
+                continue
+
+            active_group_idxs = np.fromiter(sample_groups, dtype=np.int64)
+            pos_emit[sample_idx] = np.bitwise_or.reduce(self.group_emit_pos[active_group_idxs], axis=0)
+            neg_emit[sample_idx] = np.bitwise_and.reduce(self.group_emit_neg[active_group_idxs], axis=0)
+
+            if update_gate:
+                observed_pos = tokens[sample_idx]
+                observed_neg = self._input_neg_observed(tokens[sample_idx:sample_idx + 1])[0]
+                for group_idx in active_group_idxs:
+                    if (
+                        group_case_counts[group_idx] >= confidence_case_count
+                        or group_score[group_idx] >= match_score_threshold
+                    ):
+                        self.group_emit_pos[group_idx] |= observed_pos
+                        self.group_emit_neg[group_idx] &= observed_neg
+
+        final_emit = pos_emit & neg_emit
+        return final_emit, matched, choices
+
     # this is forward and reverse
     def forward(self, tokens:State) -> tuple[Diff, Emit, np.ndarray]:
         assert tokens.dtype == self.match.dtype
         assert tokens.shape[1] == self.match.shape[1]
 
-
         match_view = self.match[None, ..., :self.array_used]
         emit_view = self.emit[None, :, :self.array_used]
-
-        tokens_inv = ~tokens.copy()
-        input: Diff = np.stack((tokens, tokens_inv), axis=1)
-
-        # FORWARD
-        selection = input[..., None] & match_view
-
-        choices: np.ndarray = (selection == match_view).all((1,2))
+        choices, input = self._match_choices(tokens)
 
         emit_mask: np.ndarray = self.emit[:, :self.array_used].any(axis=(0, 2))
 
@@ -196,6 +290,8 @@ class U1XToU1X:
             self.match[1, :, self.array_used] &= neg_case
 
             self._set_emit_group_bit(self.array_used, new_group_idx, is_member=True)
+            self.group_emit_pos[new_group_idx] = self.match[0, :, self.array_used]
+            self.group_emit_neg[new_group_idx] = self.match[1, :, self.array_used]
 
             if new_group_idx:
                 full_words, rem_bits = divmod(new_group_idx, 64)
@@ -205,3 +301,54 @@ class U1XToU1X:
 
             self._set_emit_group_bit(slice(None, self.array_used), new_group_idx, is_member=False)
             self.array_used += 1
+
+    def settle_step(
+        self,
+        state: State,
+        *,
+        merge_mode: str = "overwrite",
+        retain_mask: np.ndarray | None = None,
+    ) -> tuple[State, dict[str, int | bool]]:
+        choices, _ = self._match_choices(state)
+        final_emit, was_matched, _ = self._group_emit_for_choices(
+            state,
+            choices,
+            update_gate=False,
+            confidence_case_count=2,
+            match_score_threshold=1,
+        )
+
+        if merge_mode == "overwrite":
+            next_state = final_emit
+        elif merge_mode == "leaky":
+            if retain_mask is None:
+                retain_mask = np.iinfo(state.dtype).max
+            next_state = (state & retain_mask) | final_emit
+        else:
+            raise ValueError("merge_mode must be 'overwrite' or 'leaky'")
+
+        metrics = {
+            "matched_inputs": int(was_matched.sum()),
+            "unmatched_inputs": int((~was_matched).sum()),
+            "active_cases": int(self.array_used),
+            "active_groups": int(self.emit_used),
+        }
+        return next_state, metrics
+
+    def train_emit(
+        self,
+        state: State,
+        *,
+        update_gate: bool = True,
+        confidence_case_count: int = 2,
+        match_score_threshold: int = 1,
+    ) -> np.ndarray:
+        choices, _ = self._match_choices(state)
+        final_emit, _, _ = self._group_emit_for_choices(
+            state,
+            choices,
+            update_gate=update_gate,
+            confidence_case_count=confidence_case_count,
+            match_score_threshold=match_score_threshold,
+        )
+        return final_emit
