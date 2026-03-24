@@ -4,6 +4,8 @@ from collections.abc import Callable
 import numpy as np
 
 from neurrayv4 import U1XToU1X
+from nnv5_u64_dtype import encode_batch as encode_7x7_batch_to_u64
+from nnv5_u64_dtype import encode_28x28_batch as encode_28x28_batch_to_u64x16
 
 
 def format_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> str:
@@ -54,6 +56,7 @@ def dataset(
     report_every: int = 1000,
     reporter: Callable[[str], None] | None = print,
     reset_stats_between_stages: bool = True,
+    block_mode: str = "4x4",
 ):
     import tensorflow_datasets as tfds
 
@@ -73,45 +76,64 @@ def dataset(
     x_train, y_train = train_np
     x_test, y_test   = test_np
 
-    def chunk_mnist_for_U1X(x: np.ndarray) -> np.ndarray:
+    def chunk_mnist_for_U1X(x: np.ndarray, mode: str) -> np.ndarray:
         """
         x: numpy array of shape (N, 28, 28)
-        returns: (N, 4, 4, 7, 7)
+        returns:
+            mode="4x4" -> (N, 49, 16), where each token is a 4x4 block (16 bytes)
+            mode="7x7" -> (N, 16, 1), where each token is one encoded 7x7 block
+            mode="28x28" -> (N, 1, 16), where each sample is 16 encoded 7x7 blocks
         """
         N, H, W, _ = x.shape
         assert H == 28 and W == 28
 
-        # reshape + transpose trick
-        tiles = (
-            x
-            .reshape(N, 4, 7, 4, 7)
-            .transpose(0, 1, 3, 2, 4)
-        )
+        if mode == "4x4":
+            # Create a 7x7 grid of 4x4 blocks.
+            # (N, 28, 28, 1) -> (N, 7, 4, 7, 4) -> (N, 7, 7, 4, 4)
+            tiles = x.reshape(N, 7, 4, 7, 4).transpose(0, 1, 3, 2, 4)
+            # flatten 4x4 -> 16 bytes
+            tiles = tiles.reshape(tiles.shape[0], 7, 7, -1)            # (N, 7, 7, 16)
+            # reorder to token-major and flatten grid 7x7 -> 49 tokens
+            tiles = tiles.reshape(tiles.shape[0], -1, tiles.shape[-1])  # (N, 49, 16)
+            return tiles
 
-        # flatten 7x7
-        tiles = tiles.reshape(tiles.shape[0], 4, 4, -1)    # (N,4,4,49)
+        if mode == "7x7":
+            # Create a 4x4 grid of 7x7 blocks.
+            # (N, 28, 28, 1) -> (N, 4, 7, 4, 7) -> (N, 4, 4, 7, 7)
+            tiles = x.reshape(N, 4, 7, 4, 7).transpose(0, 1, 3, 2, 4)
+            # Run the NNv5 structured encoder over each 7x7 block.
+            # (N, 4, 4, 7, 7) -> (N * 16, 7, 7) -> encode -> (N, 16, 1)
+            tiles = tiles.reshape(tiles.shape[0], 16, 7, 7)
+            flat_tiles = tiles.reshape(tiles.shape[0] * tiles.shape[1], 7, 7)
+            encoded = encode_7x7_batch_to_u64(flat_tiles)
+            tiles = encoded.reshape(tiles.shape[0], tiles.shape[1], 1)
+            return tiles
 
-        # reorder to tokens
-        tiles = tiles.transpose(0, 3, 1, 2)                # (N,49,4,4)
+        if mode == "28x28":
+            # Encode full 28x28 as a 4x4 grid of encoded 7x7 blocks -> 16 uint64 words.
+            # Shape for U1X: one token per sample, each token has 16 uint64 words.
+            encoded = encode_28x28_batch_to_u64x16(x[..., 0])
+            return encoded[:, None, :]
 
-        # now flatten 4x4 to 16 tokens
-        tiles = tiles.reshape(tiles.shape[0], tiles.shape[1], -1)  # (N,49,16)
+        raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4', '7x7', or '28x28'.")
 
-        return tiles
-
-    def recast_u64(a:np.ndarray) -> np.ndarray:
+    def recast_u64(a: np.ndarray) -> np.ndarray:
         a = np.ascontiguousarray(a)
-
+        trailing = a.shape[-1]
+        remainder = trailing % 8
+        if remainder != 0:
+            pad = 8 - remainder
+            a = np.pad(a, [(0, 0)] * (a.ndim - 1) + [(0, pad)], mode="constant")
         b = a.view(np.uint64)
-        b = b.reshape(*a.shape[:-1], 2)
+        b = b.reshape(*a.shape[:-1], a.shape[-1] // 8)
         return b
 
-    # `tiles` is from your chunking function, shape (N, 4, 4, 7, 7)
-    tiles_train = chunk_mnist_for_U1X(x_train)
-    tiles_eval = chunk_mnist_for_U1X(x_test)
+    tiles_train = chunk_mnist_for_U1X(x_train, mode=block_mode)
+    tiles_eval = chunk_mnist_for_U1X(x_test, mode=block_mode)
 
-    tiles_train = recast_u64(tiles_train)
-    tiles_eval = recast_u64(tiles_eval)
+    if block_mode == "4x4":
+        tiles_train = recast_u64(tiles_train)
+        tiles_eval = recast_u64(tiles_eval)
 
     print(tiles_train.shape)
     gen = np.random.default_rng()
@@ -127,7 +149,7 @@ def dataset(
 
     # we love setup being 4 seconds out of 28 second runtime on the poor laptop
 
-    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000, groups=40) # case count inflated as chunking code was swapped for 7x7 tiles instead of 4x4
+    neur = U1XToU1X(np.empty(tiles_train.shape[2], tiles_train.dtype), cases=100_000, groups=40)
 
     counter = 0
 
@@ -176,6 +198,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run NN structural engine diagnostics")
     parser.add_argument("--mode", choices=("dataset", "sanity"), default="dataset")
     parser.add_argument(
+        "--block-mode",
+        choices=("4x4", "7x7", "28x28"),
+        default="4x4",
+        help="Dataset block extraction mode: 4x4 raw blocks, 7x7 encoded blocks, or full 28x28 as 16 encoded 7x7 blocks.",
+    )
+    parser.add_argument(
         "--report-every",
         type=int,
         default=1000,
@@ -196,6 +224,7 @@ def main() -> None:
         report_every=args.report_every,
         reporter=print,
         reset_stats_between_stages=not args.no_reset_between_stages,
+        block_mode=args.block_mode,
     )
 
 
