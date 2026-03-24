@@ -5,6 +5,7 @@ import numpy as np
 
 from neurrayv4 import U1XToU1X
 from nnv5_u64_dtype import encode_batch as encode_7x7_batch_to_u64
+from nnv5_u64_dtype import encode_28x28_batch as encode_28x28_batch_to_u64x16
 
 
 def format_debug_stats(neur: U1XToU1X, prefix: str = "debug") -> str:
@@ -80,7 +81,8 @@ def dataset(
         x: numpy array of shape (N, 28, 28)
         returns:
             mode="4x4" -> (N, 49, 16), where each token is a 4x4 block (16 bytes)
-            mode="7x7" -> (N, 16, 49), where each token is a 7x7 block (49 bytes)
+            mode="7x7" -> (N, 16, 1), where each token is one encoded 7x7 block
+            mode="28x28" -> (N, 1, 16), where each sample is 16 encoded 7x7 blocks
         """
         N, H, W, _ = x.shape
         assert H == 28 and W == 28
@@ -107,7 +109,13 @@ def dataset(
             tiles = encoded.reshape(tiles.shape[0], tiles.shape[1], 1)
             return tiles
 
-        raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4' or '7x7'.")
+        if mode == "28x28":
+            # Encode full 28x28 as a 4x4 grid of encoded 7x7 blocks -> 16 uint64 words.
+            # Shape for U1X: one token per sample, each token has 16 uint64 words.
+            encoded = encode_28x28_batch_to_u64x16(x[..., 0])
+            return encoded[:, None, :]
+
+        raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4', '7x7', or '28x28'.")
 
     def recast_u64(a: np.ndarray) -> np.ndarray:
         a = np.ascontiguousarray(a)
@@ -191,9 +199,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=("dataset", "sanity"), default="dataset")
     parser.add_argument(
         "--block-mode",
-        choices=("4x4", "7x7"),
+        choices=("4x4", "7x7", "28x28"),
         default="4x4",
-        help="Dataset block extraction mode: 4x4 blocks in a 7x7 grid or 7x7 blocks in a 4x4 grid.",
+        help="Dataset block extraction mode: 4x4 raw blocks, 7x7 encoded blocks, or full 28x28 as 16 encoded 7x7 blocks.",
     )
     parser.add_argument(
         "--report-every",

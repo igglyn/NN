@@ -243,6 +243,30 @@ def encode_batch(images: Any) -> np.ndarray:
     return np.sum(encoded, axis=1, dtype=np.uint64)
 
 
+def encode_28x28_to_u64x16(image: Any) -> np.ndarray:
+    """Encode one 28x28 grayscale sample into 16 uint64 values (4x4 grid of 7x7 blocks)."""
+    arr = np.asarray(image)
+    if arr.shape != (28, 28):
+        raise ValueError(f"Expected shape (28, 28), got {arr.shape}")
+    return encode_28x28_batch(arr[None, ...])[0]
+
+
+def encode_28x28_batch(images: Any) -> np.ndarray:
+    """Encode batch of 28x28 grayscale samples into uint64 array of shape (N, 16)."""
+    arr = np.asarray(images)
+    if arr.ndim != 3 or arr.shape[1:] != (28, 28):
+        raise ValueError(f"Expected batch shape (N, 28, 28), got {arr.shape}")
+
+    arr = arr.astype(np.float32, copy=False)
+    if np.any(arr < 0) or np.any(arr > 255):
+        raise ValueError("Input values must be within [0, 255]")
+
+    # (N, 28, 28) -> (N, 4, 7, 4, 7) -> (N, 4, 4, 7, 7) -> (N * 16, 7, 7)
+    blocks = arr.reshape(arr.shape[0], 4, 7, 4, 7).transpose(0, 1, 3, 2, 4).reshape(-1, 7, 7)
+    encoded_blocks = encode_batch(blocks)
+    return encoded_blocks.reshape(arr.shape[0], 16)
+
+
 def demo_self_test() -> dict[str, Any]:
     """Small deterministic helper for quick manual inspection."""
     demo = np.array(
