@@ -251,6 +251,30 @@ def encode_28x28_to_u64x16(image: Any) -> np.ndarray:
     return encode_28x28_batch(arr[None, ...])[0]
 
 
+def encode_14x14_to_u64x4(image: Any) -> np.ndarray:
+    """Encode one 14x14 grayscale sample into 4 uint64 values (2x2 grid of 7x7 blocks)."""
+    arr = np.asarray(image)
+    if arr.shape != (14, 14):
+        raise ValueError(f"Expected shape (14, 14), got {arr.shape}")
+    return encode_14x14_batch(arr[None, ...])[0]
+
+
+def encode_14x14_batch(images: Any) -> np.ndarray:
+    """Encode batch of 14x14 grayscale samples into uint64 array of shape (N, 4)."""
+    arr = np.asarray(images)
+    if arr.ndim != 3 or arr.shape[1:] != (14, 14):
+        raise ValueError(f"Expected batch shape (N, 14, 14), got {arr.shape}")
+
+    arr = arr.astype(np.float32, copy=False)
+    if np.any(arr < 0) or np.any(arr > 255):
+        raise ValueError("Input values must be within [0, 255]")
+
+    # (N, 14, 14) -> (N, 2, 7, 2, 7) -> (N, 2, 2, 7, 7) -> (N * 4, 7, 7)
+    blocks = arr.reshape(arr.shape[0], 2, 7, 2, 7).transpose(0, 1, 3, 2, 4).reshape(-1, 7, 7)
+    encoded_blocks = encode_batch(blocks)
+    return encoded_blocks.reshape(arr.shape[0], 4)
+
+
 def encode_28x28_batch(images: Any) -> np.ndarray:
     """Encode batch of 28x28 grayscale samples into uint64 array of shape (N, 16)."""
     arr = np.asarray(images)

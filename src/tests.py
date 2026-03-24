@@ -5,6 +5,7 @@ import numpy as np
 
 from neurrayv4 import U1XToU1X
 from nnv5_u64_dtype import encode_batch as encode_7x7_batch_to_u64
+from nnv5_u64_dtype import encode_14x14_batch as encode_14x14_batch_to_u64x4
 from nnv5_u64_dtype import encode_28x28_batch as encode_28x28_batch_to_u64x16
 
 
@@ -57,7 +58,7 @@ def dataset(
     reporter: Callable[[str], None] | None = print,
     reset_stats_between_stages: bool = True,
     block_mode: str = "4x4",
-    full_image_batch_size: int = 16,
+    full_image_batch_size: int = 1,
 ):
     import tensorflow_datasets as tfds
 
@@ -77,13 +78,27 @@ def dataset(
     x_train, y_train = train_np
     x_test, y_test   = test_np
 
+    def apply_batch_multiplier(tokens: np.ndarray, multiplier: int) -> np.ndarray:
+        """
+        Multiply existing token-batch size by grouping consecutive samples.
+        Input shape: (N, B, W) -> Output shape: (N / M, B * M, W)
+        """
+        if multiplier <= 0:
+            raise ValueError("full_image_batch_size must be > 0")
+        if tokens.shape[0] % multiplier != 0:
+            raise ValueError(
+                f"full_image_batch_size={multiplier} must divide dataset size {tokens.shape[0]}."
+            )
+        return tokens.reshape(tokens.shape[0] // multiplier, tokens.shape[1] * multiplier, tokens.shape[2])
+
     def chunk_mnist_for_U1X(x: np.ndarray, mode: str) -> np.ndarray:
         """
         x: numpy array of shape (N, 28, 28)
         returns:
             mode="4x4" -> (N, 49, 16), where each token is a 4x4 block (16 bytes)
             mode="7x7" -> (N, 16, 1), where each token is one encoded 7x7 block
-            mode="28x28" -> (N / B, B, 16), batched full-image tokens (B divides N)
+            mode="14x14" -> (N / M, 4 * M, 4), 14x14 encoded tokens with batch multiplier M
+            mode="28x28" -> (N / M, 1 * M, 16), full-image encoded tokens with batch multiplier M
         """
         N, H, W, _ = x.shape
         assert H == 28 and W == 28
@@ -112,18 +127,19 @@ def dataset(
 
         if mode == "28x28":
             # Encode full 28x28 as a 4x4 grid of encoded 7x7 blocks -> 16 uint64 words.
-            # Shape for U1X: batchable tokens, each token has 16 uint64 words.
             encoded = encode_28x28_batch_to_u64x16(x[..., 0])
-            if full_image_batch_size <= 0:
-                raise ValueError("full_image_batch_size must be > 0")
-            if encoded.shape[0] % full_image_batch_size != 0:
-                raise ValueError(
-                    f"full_image_batch_size={full_image_batch_size} must divide dataset size "
-                    f"{encoded.shape[0]} for block_mode='28x28'."
-                )
-            return encoded.reshape(encoded.shape[0] // full_image_batch_size, full_image_batch_size, encoded.shape[1])
+            tokens = encoded[:, None, :]
+            return apply_batch_multiplier(tokens, full_image_batch_size)
 
-        raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4', '7x7', or '28x28'.")
+        if mode == "14x14":
+            # Split full image into 2x2 grid of 14x14 patches, each patch encoded to 4 uint64 words.
+            # Base token shape is (N, 4, 4); multiplier scales the token-batch dimension.
+            patches = x[..., 0].reshape(N, 2, 14, 2, 14).transpose(0, 1, 3, 2, 4).reshape(-1, 14, 14)
+            encoded = encode_14x14_batch_to_u64x4(patches)
+            tokens = encoded.reshape(N, 4, 4)
+            return apply_batch_multiplier(tokens, full_image_batch_size)
+
+        raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4', '7x7', '14x14', or '28x28'.")
 
     def recast_u64(a: np.ndarray) -> np.ndarray:
         a = np.ascontiguousarray(a)
@@ -207,9 +223,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=("dataset", "sanity"), default="dataset")
     parser.add_argument(
         "--block-mode",
-        choices=("4x4", "7x7", "28x28"),
+        choices=("4x4", "7x7", "14x14", "28x28"),
         default="4x4",
-        help="Dataset block extraction mode: 4x4 raw blocks, 7x7 encoded blocks, or full 28x28 as 16 encoded 7x7 blocks.",
+        help="Dataset block extraction mode: 4x4 raw blocks, 7x7 encoded blocks, 14x14 encoded patches, or full 28x28 as 16 encoded 7x7 blocks.",
     )
     parser.add_argument(
         "--report-every",
@@ -220,8 +236,8 @@ def main() -> None:
     parser.add_argument(
         "--full-image-batch-size",
         type=int,
-        default=16,
-        help="Batch size for block-mode=28x28; value must divide dataset size (e.g., 60000 for MNIST train).",
+        default=1,
+        help="Batch-size multiplier for encoded full-image modes (14x14, 28x28); value must divide dataset size.",
     )
     parser.add_argument(
         "--no-reset-between-stages",
