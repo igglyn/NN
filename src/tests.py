@@ -57,6 +57,7 @@ def dataset(
     reporter: Callable[[str], None] | None = print,
     reset_stats_between_stages: bool = True,
     block_mode: str = "4x4",
+    full_image_batch_size: int = 16,
 ):
     import tensorflow_datasets as tfds
 
@@ -82,7 +83,7 @@ def dataset(
         returns:
             mode="4x4" -> (N, 49, 16), where each token is a 4x4 block (16 bytes)
             mode="7x7" -> (N, 16, 1), where each token is one encoded 7x7 block
-            mode="28x28" -> (N, 1, 16), where each sample is 16 encoded 7x7 blocks
+            mode="28x28" -> (N / B, B, 16), batched full-image tokens (B divides N)
         """
         N, H, W, _ = x.shape
         assert H == 28 and W == 28
@@ -111,9 +112,16 @@ def dataset(
 
         if mode == "28x28":
             # Encode full 28x28 as a 4x4 grid of encoded 7x7 blocks -> 16 uint64 words.
-            # Shape for U1X: one token per sample, each token has 16 uint64 words.
+            # Shape for U1X: batchable tokens, each token has 16 uint64 words.
             encoded = encode_28x28_batch_to_u64x16(x[..., 0])
-            return encoded[:, None, :]
+            if full_image_batch_size <= 0:
+                raise ValueError("full_image_batch_size must be > 0")
+            if encoded.shape[0] % full_image_batch_size != 0:
+                raise ValueError(
+                    f"full_image_batch_size={full_image_batch_size} must divide dataset size "
+                    f"{encoded.shape[0]} for block_mode='28x28'."
+                )
+            return encoded.reshape(encoded.shape[0] // full_image_batch_size, full_image_batch_size, encoded.shape[1])
 
         raise ValueError(f"Unsupported block_mode: {mode}. Use '4x4', '7x7', or '28x28'.")
 
@@ -210,6 +218,12 @@ def main() -> None:
         help="Emit periodic debug logs every N batches; set to 0 to disable periodic logs.",
     )
     parser.add_argument(
+        "--full-image-batch-size",
+        type=int,
+        default=16,
+        help="Batch size for block-mode=28x28; value must divide dataset size (e.g., 60000 for MNIST train).",
+    )
+    parser.add_argument(
         "--no-reset-between-stages",
         action="store_true",
         help="Keep debug counters cumulative across training and evaluation.",
@@ -225,6 +239,7 @@ def main() -> None:
         reporter=print,
         reset_stats_between_stages=not args.no_reset_between_stages,
         block_mode=args.block_mode,
+        full_image_batch_size=args.full_image_batch_size,
     )
 
 
