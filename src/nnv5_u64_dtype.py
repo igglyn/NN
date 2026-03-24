@@ -100,106 +100,98 @@ def _to_image_array(image: Any) -> np.ndarray:
     return arr
 
 
-def _floor_bucket(floor_val: float) -> int:
-    """3-bit coarse floor bucket from local minimum."""
-    bucket = int(floor_val) // FLOOR_BUCKET_SIZE
-    if bucket < 0:
-        return 0
-    if bucket > 7:
-        return 7
-    return bucket
+def _to_batch_array(images: Any) -> np.ndarray:
+    """Validate/coerce input into a (N, 7, 7) float32 array in [0, 255]."""
+    arr = np.asarray(images)
+    if arr.ndim != 3 or arr.shape[1:] != (7, 7):
+        raise ValueError(f"Expected batch shape (N, 7, 7), got {arr.shape}")
+    arr = arr.astype(np.float32, copy=False)
+    if np.any(arr < 0) or np.any(arr > 255):
+        raise ValueError("Input values must be within [0, 255]")
+    return arr
 
 
-def _extract_block_bits(block: np.ndarray) -> int:
-    """Encode one 4x4 block into the 16-bit local descriptor."""
-    floor_val = float(np.min(block))
-    norm = block - floor_val
+def _extract_overlapping_blocks(batch: np.ndarray) -> np.ndarray:
+    """Extract all 4 overlapping 4x4 windows. Output shape: (N, 4, 4, 4)."""
+    return np.stack(
+        [batch[:, rs, cs] for rs, cs in BLOCK_SLICES],
+        axis=1,
+    )
 
-    bits = 0
 
-    # Bits 0..2: floor bucket
-    floor_bits = _floor_bucket(floor_val)
-    bits |= floor_bits
+def _encode_blocks_to_u16(blocks: np.ndarray) -> np.ndarray:
+    """Vectorized encoding of blocks with shape (M, 4, 4) into uint16 descriptors."""
+    floor_vals = np.min(blocks, axis=(1, 2))
+    norm = blocks - floor_vals[:, None, None]
 
-    # Bits 3..5: threshold ladder on normalized values
-    if np.any(norm >= THRESH_T1):
-        bits |= 1 << 3
-    if np.any(norm >= THRESH_T2):
-        bits |= 1 << 4
-    if np.any(norm >= THRESH_T3):
-        bits |= 1 << 5
+    bits = np.clip((floor_vals // FLOOR_BUCKET_SIZE).astype(np.int32), 0, 7).astype(np.uint16)
 
-    # Bit 6: top half brighter than bottom half
-    top_mean = float(np.mean(norm[0:2, :]))
-    bottom_mean = float(np.mean(norm[2:4, :]))
-    if top_mean > bottom_mean + EPSILON:
-        bits |= 1 << 6
+    # Bits 3..5: threshold ladder
+    bits |= (np.any(norm >= THRESH_T1, axis=(1, 2)).astype(np.uint16) << np.uint16(3))
+    bits |= (np.any(norm >= THRESH_T2, axis=(1, 2)).astype(np.uint16) << np.uint16(4))
+    bits |= (np.any(norm >= THRESH_T3, axis=(1, 2)).astype(np.uint16) << np.uint16(5))
 
-    # Bit 7: left half brighter than right half
-    left_mean = float(np.mean(norm[:, 0:2]))
-    right_mean = float(np.mean(norm[:, 2:4]))
-    if left_mean > right_mean + EPSILON:
-        bits |= 1 << 7
+    # Bit 6: top brighter than bottom
+    top_mean = np.mean(norm[:, 0:2, :], axis=(1, 2))
+    bottom_mean = np.mean(norm[:, 2:4, :], axis=(1, 2))
+    bits |= ((top_mean > (bottom_mean + EPSILON)).astype(np.uint16) << np.uint16(6))
 
-    # Bit 8: main diagonal stronger than off diagonal (2x2 quadrant energy)
-    q_tl = float(np.sum(norm[0:2, 0:2]))
-    q_tr = float(np.sum(norm[0:2, 2:4]))
-    q_bl = float(np.sum(norm[2:4, 0:2]))
-    q_br = float(np.sum(norm[2:4, 2:4]))
-    if (q_tl + q_br) > (q_tr + q_bl) + EPSILON:
-        bits |= 1 << 8
+    # Bit 7: left brighter than right
+    left_mean = np.mean(norm[:, :, 0:2], axis=(1, 2))
+    right_mean = np.mean(norm[:, :, 2:4], axis=(1, 2))
+    bits |= ((left_mean > (right_mean + EPSILON)).astype(np.uint16) << np.uint16(7))
 
-    # Bit 9: single dominant hotspot exists
-    flat = np.sort(norm.reshape(-1))
-    peak = float(flat[-1])
-    second = float(flat[-2])
-    if peak >= HOTSPOT_MIN and (peak - second) >= HOTSPOT_GAP:
-        bits |= 1 << 9
+    # Bit 8: main diagonal (quadrants) stronger than off diagonal
+    q_tl = np.sum(norm[:, 0:2, 0:2], axis=(1, 2))
+    q_tr = np.sum(norm[:, 0:2, 2:4], axis=(1, 2))
+    q_bl = np.sum(norm[:, 2:4, 0:2], axis=(1, 2))
+    q_br = np.sum(norm[:, 2:4, 2:4], axis=(1, 2))
+    bits |= ((((q_tl + q_br) > (q_tr + q_bl + EPSILON)).astype(np.uint16)) << np.uint16(8))
 
-    # Bit 10: near-uniform after normalization
-    norm_std = float(np.std(norm))
-    norm_range = float(np.max(norm) - np.min(norm))
-    if norm_std <= UNIFORM_STD_MAX and norm_range <= UNIFORM_RANGE_MAX:
-        bits |= 1 << 10
+    # Bit 9: single dominant hotspot
+    flat_sorted = np.sort(norm.reshape(norm.shape[0], -1), axis=1)
+    peak = flat_sorted[:, -1]
+    second = flat_sorted[:, -2]
+    hotspot = (peak >= HOTSPOT_MIN) & ((peak - second) >= HOTSPOT_GAP)
+    bits |= (hotspot.astype(np.uint16) << np.uint16(9))
 
-    # Bit 11: multiple raised cells present (>=2 cells above T2)
-    if int(np.count_nonzero(norm >= THRESH_T2)) >= 2:
-        bits |= 1 << 11
+    # Bit 10: near-uniform
+    norm_std = np.std(norm, axis=(1, 2))
+    norm_range = np.max(norm, axis=(1, 2)) - np.min(norm, axis=(1, 2))
+    uniform = (norm_std <= UNIFORM_STD_MAX) & (norm_range <= UNIFORM_RANGE_MAX)
+    bits |= (uniform.astype(np.uint16) << np.uint16(10))
 
-    # Bit 12: vertical gradient cue present
-    row_means = np.mean(norm, axis=1)
-    if (row_means[3] - row_means[0]) >= GRAD_ROW_STEP:
-        bits |= 1 << 12
+    # Bit 11: multiple raised cells (>=2 at T2)
+    raised = np.count_nonzero(norm >= THRESH_T2, axis=(1, 2)) >= 2
+    bits |= (raised.astype(np.uint16) << np.uint16(11))
 
-    # Bit 13: horizontal gradient cue present
-    col_means = np.mean(norm, axis=0)
-    if (col_means[3] - col_means[0]) >= GRAD_COL_STEP:
-        bits |= 1 << 13
+    # Bit 12: vertical gradient
+    row_means = np.mean(norm, axis=2)
+    vgrad = (row_means[:, 3] - row_means[:, 0]) >= GRAD_ROW_STEP
+    bits |= (vgrad.astype(np.uint16) << np.uint16(12))
 
-    # Bit 14: corner-weighted structure present
-    corner_sum = float(norm[0, 0] + norm[0, 3] + norm[3, 0] + norm[3, 3])
-    interior_sum = float(norm[1, 1] + norm[1, 2] + norm[2, 1] + norm[2, 2])
-    if corner_sum > interior_sum + CORNER_ENERGY_MARGIN:
-        bits |= 1 << 14
+    # Bit 13: horizontal gradient
+    col_means = np.mean(norm, axis=1)
+    hgrad = (col_means[:, 3] - col_means[:, 0]) >= GRAD_COL_STEP
+    bits |= (hgrad.astype(np.uint16) << np.uint16(13))
 
-    # Bit 15: exceed/saturation/detail flag
-    if norm_range >= EXCEED_RANGE or norm_std >= EXCEED_STD:
-        bits |= 1 << 15
+    # Bit 14: corner weighted
+    corners = norm[:, 0, 0] + norm[:, 0, 3] + norm[:, 3, 0] + norm[:, 3, 3]
+    interior = norm[:, 1, 1] + norm[:, 1, 2] + norm[:, 2, 1] + norm[:, 2, 2]
+    corner_weighted = corners > (interior + CORNER_ENERGY_MARGIN)
+    bits |= (corner_weighted.astype(np.uint16) << np.uint16(14))
 
-    return bits & 0xFFFF
+    # Bit 15: exceed/saturation flag
+    exceed = (norm_range >= EXCEED_RANGE) | (norm_std >= EXCEED_STD)
+    bits |= (exceed.astype(np.uint16) << np.uint16(15))
+
+    return bits
 
 
 def encode_7x7_to_u64(image: Any) -> int:
     """Encode one 7x7 grayscale sample into a packed 64-bit Python int."""
     arr = _to_image_array(image)
-
-    code = 0
-    for block_idx, (row_slice, col_slice) in enumerate(BLOCK_SLICES):
-        block = arr[row_slice, col_slice]
-        block_code = _extract_block_bits(block)
-        code |= block_code << (16 * block_idx)
-
-    return int(code)
+    return int(encode_batch(arr[None, ...])[0])
 
 
 def decode_u64_fields(code: int) -> dict[str, Any]:
@@ -241,14 +233,14 @@ def decode_u64_fields(code: int) -> dict[str, Any]:
 
 def encode_batch(images: Any) -> np.ndarray:
     """Encode a batch of images into uint64 array of shape (N,)."""
-    arr = np.asarray(images)
-    if arr.ndim != 3 or arr.shape[1:] != (7, 7):
-        raise ValueError(f"Expected batch shape (N, 7, 7), got {arr.shape}")
+    batch = _to_batch_array(images)
+    blocks = _extract_overlapping_blocks(batch)                # (N, 4, 4, 4)
+    flat_blocks = blocks.reshape(blocks.shape[0] * 4, 4, 4)    # (N*4, 4, 4)
 
-    out = np.empty(arr.shape[0], dtype=np.uint64)
-    for idx in range(arr.shape[0]):
-        out[idx] = np.uint64(encode_7x7_to_u64(arr[idx]))
-    return out
+    block_codes = _encode_blocks_to_u16(flat_blocks).reshape(blocks.shape[0], 4).astype(np.uint64)
+    shifts = np.array([0, 16, 32, 48], dtype=np.uint64)
+    encoded = np.left_shift(block_codes, shifts[None, :])
+    return np.sum(encoded, axis=1, dtype=np.uint64)
 
 
 def demo_self_test() -> dict[str, Any]:
